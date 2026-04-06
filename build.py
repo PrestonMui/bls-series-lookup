@@ -216,6 +216,28 @@ programEl.addEventListener("change", () => {{
 }});
 
 // ── Fuzzy matching ──
+function scoreFrom(pLower, tLower, text, startIdx) {{
+  const pLen = pLower.length;
+  const tLen = tLower.length;
+  const positions = [];
+  let score = 0;
+  let ci = 0;
+  let prevMatch = -2;
+  for (let ti = startIdx; ti < tLen && ci < pLen; ti++) {{
+    if (tLower[ti] === pLower[ci]) {{
+      positions.push(ti);
+      score += 1;
+      if (ti === prevMatch + 1) score += 8;
+      if (ti === 0 || " _-.".includes(text[ti - 1])) score += 5;
+      if (ti === 0 && ci === 0) score += 10;
+      prevMatch = ti;
+      ci++;
+    }}
+  }}
+  if (ci < pLen) return null;
+  return {{ score, positions }};
+}}
+
 function fuzzyMatchToken(token, text) {{
   const tLower = text.toLowerCase();
   const pLower = token.toLowerCase();
@@ -223,43 +245,24 @@ function fuzzyMatchToken(token, text) {{
   const tLen = tLower.length;
   if (pLen === 0) return {{ score: 0, positions: [] }};
 
-  // Check if subsequence exists at all
-  let ci = 0;
-  for (let ti = 0; ti < tLen && ci < pLen; ti++) {{
-    if (tLower[ti] === pLower[ci]) ci++;
-  }}
-  if (ci < pLen) return null;
-
-  // Check for exact substring bonus
-  const substringIdx = tLower.indexOf(pLower);
-
-  // Greedy forward scan collecting positions
-  const positions = [];
-  let score = 0;
-  ci = 0;
-  let prevMatch = -2;
-  for (let ti = 0; ti < tLen && ci < pLen; ti++) {{
-    if (tLower[ti] === pLower[ci]) {{
-      positions.push(ti);
-      // Base score per char
-      score += 1;
-      // Consecutive bonus
-      if (ti === prevMatch + 1) score += 8;
-      // Word boundary bonus
-      if (ti === 0 || " _-.".includes(text[ti - 1])) score += 5;
-      // Prefix bonus
-      if (ti === 0 && ci === 0) score += 10;
-      prevMatch = ti;
-      ci++;
+  // Try starting the match at every position where the first char matches,
+  // keep the best scoring alignment
+  let best = null;
+  for (let start = 0; start <= tLen - pLen; start++) {{
+    if (tLower[start] === pLower[0]) {{
+      const result = scoreFrom(pLower, tLower, text, start);
+      if (result && (!best || result.score > best.score)) best = result;
     }}
   }}
+  if (!best) return null;
 
   // Exact substring bonus
+  const substringIdx = tLower.indexOf(pLower);
   if (substringIdx >= 0) {{
-    score += substringIdx === 0 ? 35 : 20;
+    best.score += substringIdx === 0 ? 35 : 20;
   }}
 
-  return {{ score, positions }};
+  return best;
 }}
 
 function fuzzyMatch(query, text) {{

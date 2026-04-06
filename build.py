@@ -93,7 +93,13 @@ h1 span {{ color: #666; font-weight: 400; }}
 #results li:hover {{ background: #f7f8fa; }}
 #results li.active {{ background: #fff; border-color: #4a90d9; }}
 #results li .sid {{ font-family: "SF Mono", "Cascadia Code", "Consolas", monospace; font-size: 0.82rem; color: #555; white-space: nowrap; flex-shrink: 0; }}
-#results li .desc {{ font-size: 0.88rem; color: #333; }}
+#results li .desc {{ font-size: 0.88rem; color: #333; flex: 1; }}
+#results li .score {{ font-family: "SF Mono", "Cascadia Code", "Consolas", monospace; font-size: 0.75rem; color: #aaa; white-space: nowrap; flex-shrink: 0; }}
+#results-header {{ display: none; padding: 4px 12px; font-size: 0.75rem; color: #999; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; gap: 10px; align-items: baseline; }}
+#results-header.visible {{ display: flex; }}
+#results-header .h-sid {{ white-space: nowrap; flex-shrink: 0; }}
+#results-header .h-desc {{ flex: 1; }}
+#results-header .h-score {{ white-space: nowrap; flex-shrink: 0; }}
 mark {{ background: #fce8a5; color: inherit; border-radius: 2px; padding: 0 1px; }}
 
 #no-results {{ display: none; text-align: center; color: #999; padding: 32px 0; font-size: 0.95rem; }}
@@ -131,6 +137,7 @@ footer {{ text-align: center; font-size: 0.78rem; color: #aaa; margin-top: 24px;
       <a id="d-link" target="_blank" rel="noopener">View on BLS &nearr;</a>
     </div>
   </div>
+  <div id="results-header"><span class="h-sid">Series ID</span><span class="h-desc">Description</span><span class="h-score">Score</span></div>
   <ul id="results"></ul>
   <div id="no-results">No series matched your query.</div>
   <footer>Built with Claude Code</footer>
@@ -156,6 +163,7 @@ const detailEl = document.getElementById("detail");
 const noResultsEl = document.getElementById("no-results");
 
 const SA_PROGRAMS = new Set(["ce", "ci", "cu", "jt", "ln", "wp"]);
+const ZERO_BONUS_PROGRAMS = new Set(["ce", "ci", "cu", "jt", "ln"]);
 
 let currentProgram = programCodes[0];
 let searchMode = "desc"; // "id" or "desc"
@@ -271,13 +279,19 @@ function fuzzyMatch(query, text) {{
 
   let totalScore = 0;
   const allPositions = new Set();
+  let queryLen = 0;
 
   for (const token of tokens) {{
     const result = fuzzyMatchToken(token, text);
     if (!result) return null;
     totalScore += result.score;
     result.positions.forEach(p => allPositions.add(p));
+    queryLen += token.length;
   }}
+
+  // Brevity: normalize by text length so concise matches rank above verbose ones.
+  // Multiply by 1000 and round to keep integer scores readable.
+  totalScore = Math.round(totalScore * 1000 / text.length);
 
   return {{ score: totalScore, positions: allPositions }};
 }}
@@ -324,7 +338,13 @@ function runSearch() {{
       const s = series[i];
       const searchStr = searchMode === "id" ? s[0] : s[1];
       const m = fuzzyMatch(query, searchStr);
-      if (m) scored.push({{ id: s[0], desc: s[1], score: m.score }});
+      if (m) {{
+        let sc = m.score;
+        if (ZERO_BONUS_PROGRAMS.has(currentProgram)) {{
+          for (let j = 0; j < s[0].length; j++) {{ if (s[0][j] === "0") sc += 200; }}
+        }}
+        scored.push({{ id: s[0], desc: s[1], score: sc }});
+      }}
     }}
     scored.sort((a, b) => b.score - a.score);
     filtered = scored.slice(0, 25);
@@ -338,13 +358,16 @@ function render(query) {{
   let totalSeries = DATA[currentProgram].length;
   if (saFilter === "sa") totalSeries = DATA[currentProgram].filter(s => s[0][2] === "S").length;
   else if (saFilter === "nsa") totalSeries = DATA[currentProgram].filter(s => s[0][2] === "U").length;
+  const headerEl = document.getElementById("results-header");
   if (filtered.length === 0) {{
     resultsEl.innerHTML = "";
+    headerEl.classList.remove("visible");
     noResultsEl.style.display = query ? "block" : "none";
     countEl.textContent = query ? "0 results" : `${{totalSeries.toLocaleString()}} series — start typing to search`;
     return;
   }}
   noResultsEl.style.display = "none";
+  headerEl.classList.toggle("visible", !!query);
   countEl.textContent = `${{filtered.length}} of ${{totalSeries.toLocaleString()}} series`;
 
   let html = "";
@@ -357,7 +380,8 @@ function render(query) {{
       hId = escHtml(r.id);
       hDesc = escHtml(r.desc);
     }}
-    html += `<li data-i="${{i}}" class="${{i === activeIdx ? "active" : ""}}"><span class="sid">${{hId}}</span><span class="desc">${{hDesc}}</span></li>`;
+    const scoreHtml = query ? `<span class="score">${{r.score}}</span>` : "";
+    html += `<li data-i="${{i}}" class="${{i === activeIdx ? "active" : ""}}"><span class="sid">${{hId}}</span><span class="desc">${{hDesc}}</span>${{scoreHtml}}</li>`;
   }}
   resultsEl.innerHTML = html;
 

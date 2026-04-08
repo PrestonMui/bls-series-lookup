@@ -94,6 +94,9 @@ h1 span {{ color: #666; font-weight: 400; }}
 #results li.active {{ background: #fff; border-color: #4a90d9; }}
 #results li .sid {{ font-family: "SF Mono", "Cascadia Code", "Consolas", monospace; font-size: 0.82rem; color: #555; white-space: nowrap; flex-shrink: 0; }}
 #results li .desc {{ font-size: 0.88rem; color: #333; flex: 1; }}
+#results li .add-btn {{ flex-shrink: 0; padding: 1px 8px; font-size: 0.78rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; color: #555; cursor: pointer; }}
+#results li .add-btn:hover {{ background: #e8f0fe; border-color: #4a90d9; color: #4a90d9; }}
+#results li .add-btn.added {{ background: #e8f0fe; border-color: #4a90d9; color: #4a90d9; }}
 #results li .score {{ font-family: "SF Mono", "Cascadia Code", "Consolas", monospace; font-size: 0.75rem; color: #aaa; white-space: nowrap; flex-shrink: 0; }}
 #results-header {{ display: none; padding: 4px 12px; font-size: 0.75rem; color: #999; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; gap: 10px; align-items: baseline; }}
 #results-header.visible {{ display: flex; }}
@@ -106,6 +109,21 @@ mark {{ background: #fce8a5; color: inherit; border-radius: 2px; padding: 0 1px;
 .byline {{ font-size: 0.82rem; color: #888; margin-bottom: 14px; }}
 .byline a {{ color: #4a90d9; text-decoration: none; }}
 .byline a:hover {{ text-decoration: underline; }}
+/* Selected series panel */
+#selected-panel {{ display: none; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px 18px; margin-top: 14px; }}
+#selected-panel.visible {{ display: block; }}
+#selected-panel h3 {{ font-size: 0.9rem; font-weight: 600; margin-bottom: 8px; }}
+#selected-list {{ list-style: none; margin-bottom: 10px; }}
+#selected-list li {{ display: flex; gap: 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid #f0f0f0; font-size: 0.85rem; }}
+#selected-list li .sel-id {{ font-family: "SF Mono", "Cascadia Code", "Consolas", monospace; font-size: 0.8rem; color: #555; flex-shrink: 0; }}
+#selected-list li .sel-desc {{ flex: 1; color: #333; }}
+#selected-list li .sel-remove {{ flex-shrink: 0; padding: 0 6px; font-size: 0.8rem; border: none; background: none; color: #c00; cursor: pointer; }}
+#selected-list li .sel-remove:hover {{ color: #f00; }}
+.selected-actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+.selected-actions button {{ padding: 5px 12px; font-size: 0.82rem; border-radius: 5px; cursor: pointer; border: 1px solid #ccc; background: #fff; color: #333; }}
+.selected-actions button:hover {{ background: #f5f5f5; }}
+.selected-actions .flash {{ color: #2a7; border-color: #2a7; }}
+
 footer {{ text-align: center; font-size: 0.78rem; color: #aaa; margin-top: 24px; padding-top: 12px; border-top: 1px solid #e0e0e0; }}
 </style>
 </head>
@@ -140,6 +158,17 @@ footer {{ text-align: center; font-size: 0.78rem; color: #aaa; margin-top: 24px;
   <div id="results-header"><span class="h-sid">Series ID</span><span class="h-desc">Description</span><span class="h-score">Score</span></div>
   <ul id="results"></ul>
   <div id="no-results">No series matched your query.</div>
+  <div id="selected-panel">
+    <h3>Selected Series (<span id="sel-count">0</span>)</h3>
+    <ul id="selected-list"></ul>
+    <div class="selected-actions">
+      <button onclick="copySelected('ids')">Copy IDs</button>
+      <button onclick="copySelected('quoted')">Copy IDs as Quoted List</button>
+      <button onclick="copySelected('both')">Copy IDs + Descriptions</button>
+      <button onclick="downloadSelected()">Download CSV</button>
+      <button onclick="clearSelected()">Clear All</button>
+    </div>
+  </div>
   <footer>Built with Claude Code</footer>
 </div>
 <script>
@@ -170,6 +199,7 @@ let searchMode = "desc"; // "id" or "desc"
 let saFilter = "all"; // "all", "sa", "nsa"
 let filtered = [];
 let activeIdx = -1;
+const selected = new Map(); // id -> desc
 
 function setMode(mode) {{
   searchMode = mode;
@@ -380,8 +410,10 @@ function render(query) {{
       hId = escHtml(r.id);
       hDesc = escHtml(r.desc);
     }}
+    const isAdded = selected.has(r.id);
+    const addBtn = `<button class="add-btn${{isAdded ? " added" : ""}}" data-id="${{escHtml(r.id)}}" onclick="toggleSelect(this, event)">${{isAdded ? "Added" : "+ Add"}}</button>`;
     const scoreHtml = query ? `<span class="score">${{r.score}}</span>` : "";
-    html += `<li data-i="${{i}}" class="${{i === activeIdx ? "active" : ""}}"><span class="sid">${{hId}}</span><span class="desc">${{hDesc}}</span>${{scoreHtml}}</li>`;
+    html += `<li data-i="${{i}}" class="${{i === activeIdx ? "active" : ""}}"><span class="sid">${{hId}}</span><span class="desc">${{hDesc}}</span>${{addBtn}}${{scoreHtml}}</li>`;
   }}
   resultsEl.innerHTML = html;
 
@@ -464,6 +496,88 @@ searchEl.addEventListener("input", () => {{
   hideDetail();
   runSearch();
 }});
+
+// ── Selected series ──
+function toggleSelect(btn, e) {{
+  e.stopPropagation();
+  const id = btn.dataset.id;
+  if (selected.has(id)) {{
+    selected.delete(id);
+    btn.classList.remove("added");
+    btn.textContent = "+ Add";
+  }} else {{
+    const item = filtered.find(r => r.id === id);
+    if (item) selected.set(id, item.desc);
+    btn.classList.add("added");
+    btn.textContent = "Added";
+  }}
+  renderSelected();
+}}
+
+function renderSelected() {{
+  const panel = document.getElementById("selected-panel");
+  const list = document.getElementById("selected-list");
+  document.getElementById("sel-count").textContent = selected.size;
+  if (selected.size === 0) {{
+    panel.classList.remove("visible");
+    return;
+  }}
+  panel.classList.add("visible");
+  let html = "";
+  for (const [id, desc] of selected) {{
+    html += `<li><span class="sel-id">${{escHtml(id)}}</span><span class="sel-desc">${{escHtml(desc)}}</span><button class="sel-remove" onclick="removeSel('${{id}}')">&times;</button></li>`;
+  }}
+  list.innerHTML = html;
+}}
+
+function removeSel(id) {{
+  selected.delete(id);
+  renderSelected();
+  // Update add button in results if visible
+  const btn = resultsEl.querySelector(`button[data-id="${{id}}"]`);
+  if (btn) {{ btn.classList.remove("added"); btn.textContent = "+ Add"; }}
+}}
+
+function clearSelected() {{
+  selected.clear();
+  renderSelected();
+  resultsEl.querySelectorAll(".add-btn.added").forEach(btn => {{
+    btn.classList.remove("added");
+    btn.textContent = "+ Add";
+  }});
+}}
+
+function copySelected(mode) {{
+  let text;
+  if (mode === "ids") {{
+    text = [...selected.keys()].join("\\n");
+  }} else if (mode === "quoted") {{
+    text = "[" + [...selected.keys()].map(id => `'${{id}}'`).join(", ") + "]";
+  }} else {{
+    text = [...selected].map(([id, desc]) => `${{id}}\\t${{desc}}`).join("\\n");
+  }}
+  navigator.clipboard.writeText(text).then(() => {{
+    const btns = document.querySelectorAll(".selected-actions button");
+    const btn = mode === "ids" ? btns[0] : mode === "quoted" ? btns[1] : btns[2];
+    const orig = btn.textContent;
+    btn.textContent = "Copied!";
+    btn.classList.add("flash");
+    setTimeout(() => {{ btn.textContent = orig; btn.classList.remove("flash"); }}, 1500);
+  }});
+}}
+
+function downloadSelected() {{
+  let csv = "series_id,description\\n";
+  for (const [id, desc] of selected) {{
+    csv += `"${{id}}","${{desc.replace(/"/g, '""')}}"\\n`;
+  }}
+  const blob = new Blob([csv], {{ type: "text/csv" }});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "bls_series.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}}
 
 // ── Init ──
 updateSAVisibility();

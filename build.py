@@ -26,7 +26,17 @@ def load_data():
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                rows.append([row["series_id"].strip(), row["description"].strip()])
+                desc = row["description"].strip()
+                # For ln, move a leading parenthesized tag like "(Seas)" or
+                # "(Unadj)" to the end so the real description starts at pos 0
+                # and ranks correctly by first-word-matches-early.
+                if code == "ln" and desc.startswith("("):
+                    end = desc.find(")")
+                    if end > 0:
+                        tag = desc[:end+1]
+                        rest = desc[end+1:].lstrip()
+                        desc = f"{rest} {tag}" if rest else tag
+                rows.append([row["series_id"].strip(), desc])
         data[code] = rows
         print(f"  {code}: {len(rows)} series")
     return data
@@ -155,7 +165,7 @@ footer {{ text-align: center; font-size: 0.78rem; color: #aaa; margin-top: 24px;
       <a id="d-link" target="_blank" rel="noopener">View on BLS &nearr;</a>
     </div>
   </div>
-  <div id="results-header"><span class="h-sid">Series ID</span><span class="h-desc">Description</span><span class="h-score">Score</span></div>
+  <div id="results-header"><span class="h-sid">Series ID</span><span class="h-desc">Description</span></div>
   <ul id="results"></ul>
   <div id="no-results">No series matched your query.</div>
   <div id="selected-panel">
@@ -261,12 +271,20 @@ function scoreFrom(pLower, tLower, text, startIdx) {{
   let score = 0;
   let ci = 0;
   let prevMatch = -2;
+  let runLen = 0;
   for (let ti = startIdx; ti < tLen && ci < pLen; ti++) {{
     if (tLower[ti] === pLower[ci]) {{
       positions.push(ti);
       score += 1;
-      if (ti === prevMatch + 1) score += 8;
-      if (ti === 0 || " _-.".includes(text[ti - 1])) score += 5;
+      if (ti === prevMatch + 1) {{
+        runLen++;
+        // Reward contiguous runs quadratically: each added char in a run
+        // contributes 2*runLen points, so a run of length k adds k*(k+1) total
+        score += 2 * runLen;
+      }} else {{
+        runLen = 0;
+      }}
+      if (ti === 0 || " _-.,()".includes(text[ti - 1])) score += 5;
       if (ti === 0 && ci === 0) score += 10;
       prevMatch = ti;
       ci++;
@@ -281,10 +299,36 @@ function fuzzyMatchToken(token, text) {{
   const pLower = token.toLowerCase();
   const pLen = pLower.length;
   const tLen = tLower.length;
-  if (pLen === 0) return {{ score: 0, positions: [] }};
+  if (pLen === 0) return {{ score: 0, positions: [], wholeWord: false, wholeWordIdx: -1 }};
 
-  // Try starting the match at every position where the first char matches,
-  // keep the best scoring alignment
+  // Look for whole-word match first
+  const wordSep = " _-.,()";
+  let wholeWordIdx = -1;
+  let searchFrom = 0;
+  while (true) {{
+    const idx = tLower.indexOf(pLower, searchFrom);
+    if (idx < 0) break;
+    const before = idx === 0 || wordSep.includes(text[idx - 1]);
+    const afterIdx = idx + pLen;
+    const after = afterIdx === tLen || wordSep.includes(text[afterIdx]);
+    if (before && after) {{ wholeWordIdx = idx; break; }}
+    searchFrom = idx + 1;
+  }}
+
+  if (wholeWordIdx >= 0) {{
+    const positions = [];
+    let score = 0;
+    for (let i = 0; i < pLen; i++) positions.push(wholeWordIdx + i);
+    score += pLen;
+    score += pLen * (pLen - 1);
+    score += 5;
+    if (wholeWordIdx === 0) score += 10;
+    score += wholeWordIdx === 0 ? 35 : 20;
+    score += 80;
+    return {{ score, positions, wholeWord: true, wholeWordIdx }};
+  }}
+
+  // Subsequence/partial match fallback
   let best = null;
   for (let start = 0; start <= tLen - pLen; start++) {{
     if (tLower[start] === pLower[0]) {{
@@ -294,36 +338,83 @@ function fuzzyMatchToken(token, text) {{
   }}
   if (!best) return null;
 
-  // Exact substring bonus
   const substringIdx = tLower.indexOf(pLower);
   if (substringIdx >= 0) {{
     best.score += substringIdx === 0 ? 35 : 20;
   }}
 
-  return best;
+  return {{ score: best.score, positions: best.positions, wholeWord: false, wholeWordIdx: -1 }};
 }}
 
+// Composite scoring with strict level hierarchy. Levels are combined into a
+// single number with large multipliers so each tier strictly dominates the
+// next. Ranking order:
+//   1. Number of whole-word matches (higher is better)
+//   2. Position ordering of whole-word matches (earlier + in-order is better)
+//   3. Total characters covered by whole-word matches (more is better)
+//   4. Greedy/partial match score (higher is better)
+//   5. Aggregate preference (more 0's in id + shorter text)
+// The zero/brevity tie-breaker is applied at search time (not here) since
+// it depends on the series id and not just the description text.
 function fuzzyMatch(query, text) {{
   const tokens = query.trim().split(/\\s+/).filter(t => t.length > 0);
-  if (tokens.length === 0) return {{ score: 0, positions: [] }};
+  if (tokens.length === 0) return {{ score: 0, positions: [], wholeWordCount: 0, orderBonus: 0, wholeWordChars: 0, partialScore: 0, textLen: text.length }};
 
-  let totalScore = 0;
   const allPositions = new Set();
-  let queryLen = 0;
+  let wholeWordCount = 0;
+  let wholeWordChars = 0;
+  let partialScore = 0;
+  const wwIndices = [];
 
   for (const token of tokens) {{
     const result = fuzzyMatchToken(token, text);
     if (!result) return null;
-    totalScore += result.score;
     result.positions.forEach(p => allPositions.add(p));
-    queryLen += token.length;
+    if (result.wholeWord) {{
+      wholeWordCount++;
+      wholeWordChars += token.length;
+      wwIndices.push(result.wholeWordIdx);
+    }} else {{
+      wwIndices.push(null);
+    }}
+    partialScore += result.score;
   }}
 
-  // Brevity: normalize by text length so concise matches rank above verbose ones.
-  // Multiply by 1000 and round to keep integer scores readable.
-  totalScore = Math.round(totalScore * 1000 / text.length);
+  // Level 2: order of whole-word matches.
+  // Reward when whole-word matches appear earlier and in the same order as
+  // the query tokens. We compute an "orderBonus": larger is better.
+  //
+  // For each consecutive pair of whole-word matches in the query, if the
+  // second match in the text comes after the first, that's +1. Also
+  // subtract the average position of whole-word matches (earlier = higher
+  // bonus). This handles both sub-requirements of the user's rule #2:
+  //   - 'Rent' matches earlier in 'Rent of primary residence' than in
+  //     "Owners' equivalent rent"
+  //   - 'all items food and energy' keeps tokens in order, favoring
+  //     'all items less food and energy' over rearranged variants
+  let orderBonus = 0;
+  let prevIdx = -1;
+  let wwSum = 0;
+  let wwN = 0;
+  for (const idx of wwIndices) {{
+    if (idx === null) continue;
+    wwSum += idx;
+    wwN++;
+    if (prevIdx >= 0 && idx > prevIdx) orderBonus += 1000;
+    prevIdx = idx;
+  }}
+  // Earlier average position → higher bonus (subtract avg position)
+  if (wwN > 0) orderBonus -= Math.round(wwSum / wwN);
 
-  return {{ score: totalScore, positions: allPositions }};
+  return {{
+    score: 0, // computed at search time with zero/brevity adjustments
+    positions: allPositions,
+    wholeWordCount,
+    orderBonus,
+    wholeWordChars,
+    partialScore,
+    textLen: text.length,
+  }};
 }}
 
 // ── Highlighting ──
@@ -369,14 +460,33 @@ function runSearch() {{
       const searchStr = searchMode === "id" ? s[0] : s[1];
       const m = fuzzyMatch(query, searchStr);
       if (m) {{
-        let sc = m.score;
+        // Level 5: aggregate preference — zero count in id + brevity bonus
+        let aggregate = 0;
         if (ZERO_BONUS_PROGRAMS.has(currentProgram)) {{
-          for (let j = 0; j < s[0].length; j++) {{ if (s[0][j] === "0") sc += 200; }}
+          for (let j = 0; j < s[0].length; j++) {{ if (s[0][j] === "0") aggregate += 30; }}
         }}
-        scored.push({{ id: s[0], desc: s[1], score: sc }});
+        // brevity: shorter text is slightly favored at the aggregate tier
+        aggregate += Math.max(0, 200 - m.textLen);
+        scored.push({{
+          id: s[0], desc: s[1],
+          wholeWordCount: m.wholeWordCount,
+          orderBonus: m.orderBonus,
+          wholeWordChars: m.wholeWordChars,
+          partialScore: m.partialScore,
+          aggregate,
+          // Displayed score: compact summary of tier values (for UI only)
+          score: m.wholeWordCount * 1000 + m.wholeWordChars * 10 + m.partialScore,
+        }});
       }}
     }}
-    scored.sort((a, b) => b.score - a.score);
+    // Hierarchical sort: each tier strictly dominates the next.
+    scored.sort((a, b) => {{
+      if (a.wholeWordCount !== b.wholeWordCount) return b.wholeWordCount - a.wholeWordCount;
+      if (a.orderBonus !== b.orderBonus) return b.orderBonus - a.orderBonus;
+      if (a.wholeWordChars !== b.wholeWordChars) return b.wholeWordChars - a.wholeWordChars;
+      if (a.partialScore !== b.partialScore) return b.partialScore - a.partialScore;
+      return b.aggregate - a.aggregate;
+    }});
     filtered = scored.slice(0, 25);
   }}
 
@@ -412,8 +522,7 @@ function render(query) {{
     }}
     const isAdded = selected.has(r.id);
     const addBtn = `<button class="add-btn${{isAdded ? " added" : ""}}" data-id="${{escHtml(r.id)}}" onclick="toggleSelect(this, event)">${{isAdded ? "Added" : "+ Add"}}</button>`;
-    const scoreHtml = query ? `<span class="score">${{r.score}}</span>` : "";
-    html += `<li data-i="${{i}}" class="${{i === activeIdx ? "active" : ""}}"><span class="sid">${{hId}}</span><span class="desc">${{hDesc}}</span>${{addBtn}}${{scoreHtml}}</li>`;
+    html += `<li data-i="${{i}}" class="${{i === activeIdx ? "active" : ""}}"><span class="sid">${{hId}}</span><span class="desc">${{hDesc}}</span>${{addBtn}}</li>`;
   }}
   resultsEl.innerHTML = html;
 

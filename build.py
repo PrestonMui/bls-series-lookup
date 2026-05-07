@@ -12,6 +12,7 @@ PROGRAMS = {
     "cx": "Consumer Expenditures Survey",
     "ei": "Import/Export Price Indices",
     "jt": "Job Openings, Layoffs and Turnover Survey",
+    "la": "Local Area Unemployment Statistics",
     "ln": "Current Population Survey",
     "pc": "Producer Price Index (Industry)",
     "tu": "Time-use Survey",
@@ -201,7 +202,7 @@ const countEl = document.getElementById("count");
 const detailEl = document.getElementById("detail");
 const noResultsEl = document.getElementById("no-results");
 
-const SA_PROGRAMS = new Set(["ce", "ci", "cu", "jt", "ln", "wp"]);
+const SA_PROGRAMS = new Set(["ce", "ci", "cu", "jt", "la", "ln", "wp"]);
 const ZERO_BONUS_PROGRAMS = new Set(["ce", "ci", "cu", "jt", "ln"]);
 
 let currentProgram = programCodes[0];
